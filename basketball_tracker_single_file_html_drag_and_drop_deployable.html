@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>🏀 Basketball Tracker</title>
+  <!-- TailwindCSS via CDN (no build needed) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* Small utility for nicer scrollbars (optional) */
+    ::-webkit-scrollbar { height: 8px; width: 8px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 9999px; }
+  </style>
+</head>
+<body class="min-h-screen bg-gray-100">
+  <div class="max-w-7xl mx-auto p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+    <!-- Left: Roster & Controls (2 cols) -->
+    <div class="lg:col-span-2 space-y-6">
+      <header class="flex flex-wrap items-center gap-3 justify-between">
+        <h1 class="text-2xl font-bold">🏀 Basketball Tracker</h1>
+        <div class="flex gap-2">
+          <button id="addPlayerBtn" class="px-4 py-2 bg-blue-600 text-white rounded-2xl shadow hover:bg-blue-700">➕ Add Player</button>
+          <button id="resetAllBtn" class="px-4 py-2 bg-gray-700 text-white rounded-2xl shadow hover:bg-gray-800">↺ Reset All</button>
+        </div>
+      </header>
+
+      <div id="playersContainer" class="grid sm:grid-cols-2 gap-6"></div>
+    </div>
+
+    <!-- Right: Event Log (1 col) -->
+    <aside class="lg:col-span-1 bg-white rounded-2xl shadow p-4 flex flex-col min-h-[400px]">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="font-semibold text-lg">Event Log</h2>
+        <button id="clearLogBtn" class="text-sm px-3 py-1 bg-gray-200 rounded hover:bg-gray-300">Clear</button>
+      </div>
+      <ul id="logList" class="text-sm space-y-1 overflow-y-auto" style="max-height: 70vh;"></ul>
+    </aside>
+  </div>
+
+  <script>
+    // -----------------------------
+    // Data Model
+    // -----------------------------
+    const players = [];
+    let playerIdSeq = 1;
+
+    const DEFAULT_STATS = () => ({
+      // Shooting
+      'FG Attempt': 0, // overall FG attempts (we'll increment when 2PT or 3PT attempts occur)
+      'FG Made': 0,    // overall FG made (increment on 2PT Made and 3PT Made)
+      '2PT Attempt': 0,
+      '2PT Made': 0,
+      '3PT Attempt': 0,
+      '3PT Made': 0,
+      'FT Attempt': 0,
+      'FT Made': 0,
+      // Other box score
+      'Rebound': 0,
+      'Assist': 0,
+      'Steal': 0,
+      'Block': 0,
+      'Foul': 0,
+      // Totals
+      'Points': 0,
+    });
+
+    const STAT_BUTTONS = [
+      'FG Attempt',
+      'FG Made',
+      '2PT Attempt',
+      '2PT Made',
+      '3PT Attempt',
+      '3PT Made',
+      'FT Attempt',
+      'FT Made',
+      'Rebound',
+      'Assist',
+      'Steal',
+      'Block',
+      'Foul',
+    ];
+
+    // -----------------------------
+    // Helpers
+    // -----------------------------
+    const fmtTime = (d = new Date()) => d.toLocaleTimeString();
+
+    function addLog(text) {
+      const li = document.createElement('li');
+      li.innerHTML = `⏱ <span class="text-gray-500">${fmtTime()}</span> - ${text}`;
+      const list = document.getElementById('logList');
+      list.prepend(li);
+    }
+
+    function createPlayer(name = `Player ${playerIdSeq}`) {
+      return {
+        id: playerIdSeq++,
+        name,
+        stats: DEFAULT_STATS(),
+        minutes: 0,      // accumulated minutes
+        subInTime: null, // ms timestamp when currently on court, else null
+      };
+    }
+
+    function addPlayer(name) {
+      players.push(createPlayer(name));
+      render();
+    }
+
+    function removePlayer(id) {
+      const idx = players.findIndex(p => p.id === id);
+      if (idx !== -1) {
+        const [p] = players.splice(idx, 1);
+        addLog(`<b>${escapeHtml(p.name)}</b> removed from roster`);
+        render();
+      }
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"];/g, function(s) {
+        switch (s) {
+          case '&': return '&amp;';
+          case '<': return '&lt;';
+          case '>': return '&gt;';
+          case '"': return '&quot;';
+          default: return s;
+        }
+      });
+    }
+
+    // -----------------------------
+    // Substitutions & Minutes
+    // -----------------------------
+    function subIn(id) {
+      const p = players.find(p => p.id === id);
+      if (!p) return;
+      if (p.subInTime == null) {
+        p.subInTime = Date.now();
+        addLog(`<b>${escapeHtml(p.name)}</b>: Sub In`);
+        render();
+      }
+    }
+
+    function subOut(id) {
+      const p = players.find(p => p.id === id);
+      if (!p) return;
+      if (p.subInTime != null) {
+        const minutesPlayed = (Date.now() - p.subInTime) / 60000;
+        p.minutes += minutesPlayed;
+        p.subInTime = null;
+        addLog(`<b>${escapeHtml(p.name)}</b>: Sub Out (+${minutesPlayed.toFixed(1)} min)`);
+        render();
+      }
+    }
+
+    function currentMinutes(p) {
+      if (p.subInTime == null) return p.minutes;
+      return p.minutes + (Date.now() - p.subInTime) / 60000;
+    }
+
+    // Update live minutes every 5 seconds for on-court players
+    setInterval(() => {
+      let anyActive = players.some(p => p.subInTime != null);
+      if (anyActive) renderStatsOnly();
+    }, 5000);
+
+    // -----------------------------
+    // Stats Logic
+    // -----------------------------
+    function updateStat(id, stat) {
+      const p = players.find(p => p.id === id);
+      if (!p) return;
+
+      // Ensure key exists
+      if (!(stat in p.stats)) p.stats[stat] = 0;
+      p.stats[stat] += 1;
+
+      // Derived effects
+      if (stat === '2PT Attempt') {
+        p.stats['FG Attempt'] += 1;
+      }
+      if (stat === '2PT Made') {
+        p.stats['2PT Attempt'] += 1;
+        p.stats['FG Attempt'] += 1;
+        p.stats['FG Made'] += 1;
+        p.stats['Points'] += 2;
+      }
+      if (stat === '3PT Attempt') {
+        p.stats['FG Attempt'] += 1; // count 3PA inside overall FG attempts
+      }
+      if (stat === '3PT Made') {
+        p.stats['3PT Attempt'] += 1;
+        p.stats['FG Attempt'] += 1; // include in FG totals
+        p.stats['FG Made'] += 1;
+        p.stats['Points'] += 3;
+      }
+      if (stat === 'FT Made') {
+        p.stats['FT Attempt'] += 1;
+        p.stats['Points'] += 1;
+      }
+      if (stat === 'FG Made') {
+        // Treat generic FG Made as a 2-pointer
+        p.stats['FG Attempt'] += 1;
+        p.stats['Points'] += 2;
+      }
+
+      addLog(`<b>${escapeHtml(p.name)}</b>: ${escapeHtml(stat)}`);
+      renderStatsOnly();
+    }
+
+    // -----------------------------
+    // Rendering
+    // -----------------------------
+    function render() {
+      const container = document.getElementById('playersContainer');
+      container.innerHTML = '';
+
+      players.forEach((p) => {
+        const card = document.createElement('div');
+        card.className = 'bg-white rounded-2xl shadow p-4 flex flex-col gap-3';
+
+        // Header: name input + active dot + remove
+        const header = document.createElement('div');
+        header.className = 'flex items-center gap-2';
+
+        const activeDot = document.createElement('span');
+        activeDot.className = 'h-3 w-3 rounded-full ' + (p.subInTime ? 'bg-green-500' : 'bg-gray-300');
+
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.value = p.name;
+        nameInput.className = 'flex-1 text-xl font-bold border p-2 rounded';
+        nameInput.addEventListener('input', (e) => {
+          p.name = e.target.value;
+        });
+
+        const removeBtn = document.createElement('button');
+        removeBtn.textContent = '✖';
+        removeBtn.className = 'px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700';
+        removeBtn.addEventListener('click', () => removePlayer(p.id));
+
+        header.appendChild(activeDot);
+        header.appendChild(nameInput);
+        header.appendChild(removeBtn);
+
+        // Sub controls
+        const subRow = document.createElement('div');
+        subRow.className = 'flex gap-2';
+
+        const subInBtn = document.createElement('button');
+        subInBtn.textContent = 'Sub In';
+        subInBtn.className = 'flex-1 px-3 py-2 bg-green-600 text-white rounded-2xl shadow hover:bg-green-700';
+        subInBtn.addEventListener('click', () => subIn(p.id));
+
+        const subOutBtn = document.createElement('button');
+        subOutBtn.textContent = 'Sub Out';
+        subOutBtn.className = 'flex-1 px-3 py-2 bg-red-600 text-white rounded-2xl shadow hover:bg-red-700';
+        subOutBtn.addEventListener('click', () => subOut(p.id));
+
+        subRow.appendChild(subInBtn);
+        subRow.appendChild(subOutBtn);
+
+        // Stat buttons grid
+        const grid = document.createElement('div');
+        grid.className = 'grid grid-cols-2 gap-2';
+
+        STAT_BUTTONS.forEach((stat) => {
+          const btn = document.createElement('button');
+          btn.textContent = stat;
+          btn.className = 'w-full px-3 py-2 bg-gray-200 rounded-2xl shadow hover:bg-gray-300 active:scale-95 transition';
+          btn.addEventListener('click', () => updateStat(p.id, stat));
+          grid.appendChild(btn);
+        });
+
+        // Stats list
+        const statsDiv = document.createElement('div');
+        statsDiv.innerHTML = `
+          <h3 class="font-semibold">Stats:</h3>
+          <ul class="text-sm space-y-0.5">
+            <li>FG: <span data-k="FG Made"></span>/<span data-k="FG Attempt"></span></li>
+            <li>2PT: <span data-k="2PT Made"></span>/<span data-k="2PT Attempt"></span></li>
+            <li>3PT: <span data-k="3PT Made"></span>/<span data-k="3PT Attempt"></span></li>
+            <li>FT: <span data-k="FT Made"></span>/<span data-k="FT Attempt"></span></li>
+            <li>Points: <span data-k="Points"></span></li>
+            <li>Minutes: <span data-minutes></span></li>
+            ${Object.keys(p.stats)
+              .filter(k => !['FG Attempt','FG Made','2PT Attempt','2PT Made','3PT Attempt','3PT Made','FT Attempt','FT Made','Points'].includes(k))
+              .map(k => `<li>${k}: <span data-k="${k}"></span></li>`)
+              .join('')}
+          </ul>`;
+
+        // Attach refs for updates
+        card.appendChild(header);
+        card.appendChild(subRow);
+        card.appendChild(grid);
+        card.appendChild(statsDiv);
+        card.dataset.playerId = p.id;
+
+        container.appendChild(card);
+      });
+
+      renderStatsOnly();
+    }
+
+    function renderStatsOnly() {
+      // Update only dynamic spans to avoid rebuilding DOM
+      document.querySelectorAll('[data-player-id]').forEach(card => {
+        const id = Number(card.dataset.playerId);
+        const p = players.find(pp => pp.id === id);
+        if (!p) return;
+        card.querySelectorAll('[data-k]').forEach(span => {
+          const key = span.getAttribute('data-k');
+          span.textContent = p.stats[key] ?? 0;
+        });
+        const mEl = card.querySelector('[data-minutes]');
+        if (mEl) mEl.textContent = currentMinutes(p).toFixed(1);
+        const dot = card.querySelector('span.h-3.w-3.rounded-full');
+        if (dot) dot.className = 'h-3 w-3 rounded-full ' + (p.subInTime ? 'bg-green-500' : 'bg-gray-300');
+      });
+    }
+
+    // -----------------------------
+    // Top-level controls
+    // -----------------------------
+    document.getElementById('addPlayerBtn').addEventListener('click', () => addPlayer());
+
+    document.getElementById('resetAllBtn').addEventListener('click', () => {
+      if (!confirm('Reset all players and logs?')) return;
+      players.length = 0;
+      playerIdSeq = 1;
+      document.getElementById('logList').innerHTML = '';
+      addPlayer('Player 1');
+      addPlayer('Player 2');
+      addLog('Game reset');
+    });
+
+    document.getElementById('clearLogBtn').addEventListener('click', () => {
+      document.getElementById('logList').innerHTML = '';
+    });
+
+    // -----------------------------
+    // Init with two players
+    // -----------------------------
+    addPlayer('Player 1');
+    addPlayer('Player 2');
+  </script>
+</body>
+</html>
